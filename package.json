@@ -1,0 +1,23 @@
+{
+  "name": "cvewatch",
+  "private": true,
+  "version": "1.0.0",
+  "description": "CVE tracking dashboard for network infrastructure (Alcatel, Palo Alto, Radware) with AI-generated fix recommendations.",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n SERVER,CLIENT -c blue,green \"npm run dev -w server\" \"npm run dev -w client\"",
+    "dev:server": "npm run dev -w server",
+    "dev:client": "npm run dev -w client",
+    "build": "npm run build -w server && npm run build -w client",
+    "db:generate": "npm run db:generate -w server",
+    "db:push": "npm run db:push -w server",
+    "db:seed": "npm run db:seed -w server",
+    "db:studio": "npm run db:studio -w server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

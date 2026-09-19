@@ -1,0 +1,112 @@
+// CVEWatch data model
+// Works against MySQL 8+ or TiDB Serverless (both speak the MySQL wire protocol).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  VIEWER
+}
+
+enum Severity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  NONE
+}
+
+enum FetchStatus {
+  SUCCESS
+  PARTIAL
+  FAILED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(VIEWER)
+  createdAt    DateTime @default(now())
+}
+
+/// A piece of infrastructure you want CVEs tracked for, e.g.
+/// "Palo Alto Networks PA-5260 firewall".
+model Product {
+  id          String   @id @default(cuid())
+  name        String   // display name, e.g. "PA-5260"
+  vendor      String   // e.g. "Palo Alto Networks"
+  category    String   // e.g. "Firewall", "Switch", "Load Balancer"
+  model       String   // e.g. "PA-5260"
+  cpeName     String?  // CPE match string used to query NVD, e.g.
+                        // "cpe:2.3:h:paloaltonetworks:pa-5260:-:*:*:*:*:*:*:*"
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  matches     ProductCve[]
+  fetchLogs   FetchHistory[]
+
+  @@index([vendor])
+}
+
+/// A CVE record cached locally from NVD so the dashboard loads fast and
+/// doesn't have to hit NVD's rate-limited API on every page view.
+model Cve {
+  id            String    @id // the CVE ID itself, e.g. "CVE-2024-3400"
+  description   String    @db.Text
+  severity      Severity  @default(NONE)
+  cvssScore     Float?
+  cvssVector    String?
+  publishedAt   DateTime?
+  lastModified  DateTime?
+  sourceUrl     String?
+  rawNvdJson    String?   @db.LongText // full NVD response, kept for audit/debug
+  aiSummary     String?   @db.Text     // AI-generated fix/recommendation text
+  aiSummaryAt   DateTime?
+  cachedAt      DateTime  @default(now())
+
+  matches       ProductCve[]
+
+  @@index([severity])
+  @@index([publishedAt])
+}
+
+/// Join table: which CVEs apply to which products, discovered via NVD CPE
+/// matching. Kept separate from Cve so one CVE can affect many products.
+model ProductCve {
+  id          String   @id @default(cuid())
+  productId   String
+  cveId       String
+  matchedAt   DateTime @default(now())
+  acknowledged Boolean @default(false) // admin has reviewed/actioned this
+
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  cve         Cve      @relation(fields: [cveId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, cveId])
+  @@index([cveId])
+}
+
+/// Audit trail of NVD fetch runs, so you can see when data was last
+/// refreshed and whether a run failed or was rate-limited.
+model FetchHistory {
+  id            String      @id @default(cuid())
+  productId     String?
+  product       Product?    @relation(fields: [productId], references: [id], onDelete: SetNull)
+  startedAt     DateTime    @default(now())
+  finishedAt    DateTime?
+  status        FetchStatus @default(SUCCESS)
+  cvesFound     Int         @default(0)
+  cvesNew       Int         @default(0)
+  errorMessage  String?     @db.Text
+
+  @@index([startedAt])
+}
