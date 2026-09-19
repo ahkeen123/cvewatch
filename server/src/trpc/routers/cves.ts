@@ -10,7 +10,8 @@ export const cvesRouter = router({
         severity: z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE"]).optional(),
         productId: z.string().optional(),
         search: z.string().optional(),
-        limit: z.number().min(1).max(200).default(50),
+        publishedAfter: z.coerce.date().optional(),
+        limit: z.number().min(1).max(500).default(50),
       })
     )
     .query(async ({ input }) => {
@@ -18,6 +19,7 @@ export const cvesRouter = router({
         where: {
           severity: input.severity,
           matches: input.productId ? { some: { productId: input.productId } } : undefined,
+          publishedAt: input.publishedAfter ? { gte: input.publishedAfter } : undefined,
           OR: input.search
             ? [
                 { id: { contains: input.search } },
@@ -28,7 +30,7 @@ export const cvesRouter = router({
         include: {
           matches: { include: { product: true } },
         },
-        orderBy: [{ severity: "asc" }, { publishedAt: "desc" }],
+        orderBy: [{ publishedAt: "desc" }],
         take: input.limit,
       });
     }),
