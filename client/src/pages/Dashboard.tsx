@@ -31,7 +31,7 @@ export default function Dashboard() {
       </p>
 
       <div className="mb-8 grid grid-cols-4 gap-px overflow-hidden rounded border border-console-border bg-console-border">
-        {(["CRITICAL", "HIGH", "MEDIUM", "LOW"] as Severity[]).map((sev) => (
+        {(["CRITICAL", "HIGH", "MEDIUM", "LOW"] as const).map((sev) => (
           <div key={sev} className="bg-console-panel px-5 py-4">
             <div className="text-xs uppercase tracking-wide text-console-muted">{sev}</div>
             <div className="mt-1 font-mono text-2xl">{totals[sev]}</div>
