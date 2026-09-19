@@ -5,21 +5,20 @@ import type { Severity } from "../types";
 
 export default function Dashboard() {
   const productsQuery = trpc.products.list.useQuery();
-  const criticalHighQuery = trpc.cves.list.useQuery({ limit: 10 });
+  const twoMonthsAgo = new Date();
+  twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
+  const recentCvesQuery = trpc.cves.list.useQuery({ publishedAfter: twoMonthsAgo, limit: 100 });
 
   const products = productsQuery.data ?? [];
-  const totals = products.reduce(
-    (acc, p) => {
-      acc.CRITICAL += p.severityCounts.CRITICAL;
-      acc.HIGH += p.severityCounts.HIGH;
-      acc.MEDIUM += p.severityCounts.MEDIUM;
-      acc.LOW += p.severityCounts.LOW;
+  const totals = (["CRITICAL", "HIGH", "MEDIUM", "LOW"] as const).reduce(
+    (acc, sev) => {
+      acc[sev] = products.reduce((sum, p) => sum + p.severityCounts[sev], 0);
       return acc;
     },
     { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 }
   );
 
-  const urgentCves = (criticalHighQuery.data ?? []).filter(
+  const urgentCves = (recentCvesQuery.data ?? []).filter(
     (c) => c.severity === "CRITICAL" || c.severity === "HIGH"
   );
 
@@ -31,7 +30,7 @@ export default function Dashboard() {
       </p>
 
       <div className="mb-8 grid grid-cols-4 gap-px overflow-hidden rounded border border-console-border bg-console-border">
-        {(["CRITICAL", "HIGH", "MEDIUM", "LOW"] as const).map((sev) => (
+        {(["CRITICAL", "HIGH", "MEDIUM", "LOW"] as Severity[]).map((sev) => (
           <div key={sev} className="bg-console-panel px-5 py-4">
             <div className="text-xs uppercase tracking-wide text-console-muted">{sev}</div>
             <div className="mt-1 font-mono text-2xl">{totals[sev]}</div>
@@ -90,11 +89,11 @@ export default function Dashboard() {
         </table>
       </div>
 
-      <h2 className="mb-3 text-lg font-semibold">Needs attention</h2>
+      <h2 className="mb-3 text-lg font-semibold">Needs attention <span className="font-normal text-sm text-console-muted">(published in the last 2 months)</span></h2>
       <div className="overflow-hidden rounded border border-console-border">
         {urgentCves.length === 0 && (
           <div className="px-4 py-6 text-center text-sm text-console-muted">
-            No critical or high-severity CVEs on record. Run a fetch from Fetch history to check for new ones.
+            No critical or high-severity CVEs published in the last 2 months. Run a fetch from Fetch history to check for new ones.
           </div>
         )}
         {urgentCves.map((cve) => (
@@ -108,6 +107,11 @@ export default function Dashboard() {
               <span className="ml-3 text-sm text-console-muted">
                 {cve.matches.map((m) => m.product.name).join(", ")}
               </span>
+              {cve.publishedAt && (
+                <span className="ml-3 text-xs text-console-muted">
+                  released {new Date(cve.publishedAt).toLocaleDateString()}
+                </span>
+              )}
             </div>
             <SeverityBadge severity={cve.severity} score={cve.cvssScore} />
           </Link>

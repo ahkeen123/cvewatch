@@ -75,6 +75,11 @@ export default function ProductDetail() {
               >
                 <div className="flex items-center gap-4">
                   <span className="font-mono text-sm">{cve.id}</span>
+                  {cve.publishedAt && (
+                    <span className="text-xs text-console-muted">
+                      released {new Date(cve.publishedAt).toLocaleDateString()}
+                    </span>
+                  )}
                   {m.acknowledged && (
                     <span className="text-xs text-console-muted">acknowledged</span>
                   )}
