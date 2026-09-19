@@ -106,7 +106,7 @@ export async function fetchCvesForCpe(cpeName: string): Promise<NvdCveResult[]> 
       throw new Error(`NVD API error ${res.status}: ${await res.text()}`);
     }
 
-    const data = await res.json();
+    const data = (await res.json()) as { vulnerabilities?: any[]; totalResults?: number };
     const vulns = data.vulnerabilities ?? [];
 
     for (const v of vulns) {
