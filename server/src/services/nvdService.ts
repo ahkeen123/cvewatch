@@ -72,17 +72,24 @@ function extractDescription(descriptions: Array<{ lang: string; value: string }>
   return descriptions?.find((d) => d.lang === "en")?.value ?? "No description available.";
 }
 
-/** Pulls vendor + product out of a CPE 2.3 string, e.g.
+/** Pulls the product name out of a CPE 2.3 string, e.g.
  * "cpe:2.3:a:f5:big-ip_access_policy_manager:*:*:*:*:*:*:*:*"
- * -> "f5 big ip access policy manager" (underscores turned into spaces
- * for a natural-language keyword search). */
+ * -> "big-ip access policy manager" (underscores turned into spaces for a
+ * natural-language keyword search; hyphens are left alone since they're
+ * usually part of the real product name, e.g. "BIG-IP").
+ *
+ * Deliberately omits the vendor name: NVD's keywordSearch requires every
+ * term to appear in the CVE description (it's an AND match), and
+ * descriptions very often don't repeat the vendor name when the product
+ * name is already distinctive (e.g. "Access Policy Manager" appears
+ * without "F5" in the actual text), so including it just causes false
+ * negatives. */
 function cpeToKeywords(cpeName: string): string | null {
   const parts = cpeName.split(":");
   // cpe : 2.3 : part : vendor : product : ...
-  const vendor = parts[3];
   const product = parts[4];
-  if (!vendor || !product) return null;
-  return `${vendor} ${product}`.replace(/_/g, " ").trim();
+  if (!product) return null;
+  return product.replace(/_/g, " ").trim();
 }
 
 async function nvdFetch(url: URL): Promise<Response> {
