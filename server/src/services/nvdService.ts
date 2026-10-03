@@ -101,21 +101,61 @@ async function nvdFetch(url: URL): Promise<Response> {
   return fetch(url.toString(), { headers });
 }
 
+/** NVD rejects any pubStartDate/pubEndDate range wider than 120 days, so a
+ * full year has to be requested in chunks. Returns chunk boundaries from
+ * Jan 1 of `year` up to "now" (never into the future). */
+function getYearDateChunks(year: number): Array<{ start: Date; end: Date }> {
+  const chunks: Array<{ start: Date; end: Date }> = [];
+  const yearStart = new Date(Date.UTC(year, 0, 1, 0, 0, 0, 0));
+  const yearEnd = new Date(Date.UTC(year, 11, 31, 23, 59, 59, 999));
+  const now = new Date();
+  const hardEnd = yearEnd < now ? yearEnd : now;
+
+  const CHUNK_DAYS = 119; // stay safely under NVD's 120-day limit
+  let cursor = yearStart;
+  while (cursor <= hardEnd) {
+    const chunkEnd = new Date(Math.min(cursor.getTime() + CHUNK_DAYS * 86400000, hardEnd.getTime()));
+    chunks.push({ start: cursor, end: chunkEnd });
+    cursor = new Date(chunkEnd.getTime() + 1);
+  }
+  return chunks;
+}
+
+/** NVD's date params want "YYYY-MM-DDTHH:mm:ss.sss" with no trailing Z. */
+function toNvdDateParam(d: Date): string {
+  return d.toISOString().replace("Z", "");
+}
+
 /**
- * Fetch all CVEs matching a CPE name (virtualMatchString), handling
- * pagination and self-throttling to respect NVD's rate limits.
+ * Fetch CVEs matching a CPE name (virtualMatchString), scoped to CVEs
+ * published in `year` only, handling pagination, NVD's 120-day max date
+ * range (so a full year is requested in chunks), and self-throttling to
+ * respect rate limits.
  *
  * NVD's virtualMatchString lookup can return 404 even for a byte-for-byte
  * correct CPE 2.3 string — this happens for products whose CVEs are
  * catalogued with version-range match criteria rather than a plain
  * wildcard entry, which virtualMatchString doesn't always resolve. Rather
  * than fail outright, we fall back to a plain keyword search on the
- * vendor/product name extracted from the CPE string, which finds the same
- * CVEs by full-text match instead of exact CPE-criteria match.
+ * product name extracted from the CPE string, which finds the same CVEs
+ * by full-text match instead of exact CPE-criteria match.
  */
-export async function fetchCvesForCpe(cpeName: string): Promise<NvdCveResult[]> {
+export async function fetchCvesForCpe(
+  cpeName: string,
+  year: number = new Date().getFullYear()
+): Promise<NvdCveResult[]> {
+  const chunks = getYearDateChunks(year);
+
   try {
-    return await fetchByVirtualMatchString(cpeName);
+    return await fetchAllChunks(chunks, (chunk, startIndex) => {
+      const url = new URL(NVD_BASE_URL);
+      url.searchParams.set("virtualMatchString", cpeName);
+      url.searchParams.set("pubStartDate", toNvdDateParam(chunk.start));
+      url.searchParams.set("pubEndDate", toNvdDateParam(chunk.end));
+      url.searchParams.set("resultsPerPage", "200");
+      url.searchParams.set("startIndex", String(startIndex));
+      return url;
+    });
   } catch (err: any) {
     if (err?.status === 404) {
       const keywords = cpeToKeywords(cpeName);
@@ -123,85 +163,56 @@ export async function fetchCvesForCpe(cpeName: string): Promise<NvdCveResult[]> 
         console.warn(
           `virtualMatchString 404 for "${cpeName}" — falling back to keyword search "${keywords}"`
         );
-        return fetchByKeywordSearch(keywords);
+        return fetchAllChunks(chunks, (chunk, startIndex) => {
+          const url = new URL(NVD_BASE_URL);
+          url.searchParams.set("keywordSearch", keywords);
+          url.searchParams.set("pubStartDate", toNvdDateParam(chunk.start));
+          url.searchParams.set("pubEndDate", toNvdDateParam(chunk.end));
+          url.searchParams.set("resultsPerPage", "200");
+          url.searchParams.set("startIndex", String(startIndex));
+          return url;
+        });
       }
     }
     throw err;
   }
 }
 
-async function fetchByVirtualMatchString(cpeName: string): Promise<NvdCveResult[]> {
+/** Walks every date chunk, paginating within each, using `buildUrl` to
+ * construct the request for a given chunk + pagination offset. */
+async function fetchAllChunks(
+  chunks: Array<{ start: Date; end: Date }>,
+  buildUrl: (chunk: { start: Date; end: Date }, startIndex: number) => URL
+): Promise<NvdCveResult[]> {
   const results: NvdCveResult[] = [];
-  let startIndex = 0;
-  const resultsPerPage = 200;
 
-  while (true) {
-    const url = new URL(NVD_BASE_URL);
-    url.searchParams.set("virtualMatchString", cpeName);
-    url.searchParams.set("resultsPerPage", String(resultsPerPage));
-    url.searchParams.set("startIndex", String(startIndex));
+  for (const chunk of chunks) {
+    let startIndex = 0;
+    while (true) {
+      const url = buildUrl(chunk, startIndex);
+      const res = await nvdFetch(url);
 
-    const res = await nvdFetch(url);
+      if (res.status === 403 || res.status === 429) {
+        await new Promise((r) => setTimeout(r, 6000));
+        continue;
+      }
+      if (!res.ok) {
+        const error: any = new Error(`NVD API error ${res.status}: ${await res.text()}`);
+        error.status = res.status;
+        throw error;
+      }
 
-    if (res.status === 403 || res.status === 429) {
-      await new Promise((r) => setTimeout(r, 6000));
-      continue;
+      const data = (await res.json()) as { vulnerabilities?: Array<{ cve: any }>; totalResults?: number };
+      const vulns = data.vulnerabilities ?? [];
+
+      for (const v of vulns) {
+        results.push(mapNvdEntry(v.cve));
+      }
+
+      const totalResults = data.totalResults ?? results.length;
+      startIndex += 200;
+      if (startIndex >= totalResults || vulns.length === 0) break;
     }
-    if (!res.ok) {
-      const error: any = new Error(`NVD API error ${res.status}: ${await res.text()}`);
-      error.status = res.status;
-      throw error;
-    }
-
-    const data = (await res.json()) as { vulnerabilities?: Array<{ cve: any }>; totalResults?: number };
-    const vulns = data.vulnerabilities ?? [];
-
-    for (const v of vulns) {
-      results.push(mapNvdEntry(v.cve));
-    }
-
-    const totalResults = data.totalResults ?? results.length;
-    startIndex += resultsPerPage;
-    if (startIndex >= totalResults || vulns.length === 0) break;
-  }
-
-  return results;
-}
-
-async function fetchByKeywordSearch(keywords: string): Promise<NvdCveResult[]> {
-  const results: NvdCveResult[] = [];
-  let startIndex = 0;
-  const resultsPerPage = 200;
-  const maxResults = 500; // keyword search can be broad; cap it to stay reasonable
-
-  while (true) {
-    const url = new URL(NVD_BASE_URL);
-    url.searchParams.set("keywordSearch", keywords);
-    url.searchParams.set("resultsPerPage", String(resultsPerPage));
-    url.searchParams.set("startIndex", String(startIndex));
-
-    const res = await nvdFetch(url);
-
-    if (res.status === 403 || res.status === 429) {
-      await new Promise((r) => setTimeout(r, 6000));
-      continue;
-    }
-    if (!res.ok) {
-      const error: any = new Error(`NVD API error ${res.status}: ${await res.text()}`);
-      error.status = res.status;
-      throw error;
-    }
-
-    const data = (await res.json()) as { vulnerabilities?: Array<{ cve: any }>; totalResults?: number };
-    const vulns = data.vulnerabilities ?? [];
-
-    for (const v of vulns) {
-      results.push(mapNvdEntry(v.cve));
-    }
-
-    const totalResults = Math.min(data.totalResults ?? results.length, maxResults);
-    startIndex += resultsPerPage;
-    if (startIndex >= totalResults || vulns.length === 0 || results.length >= maxResults) break;
   }
 
   return results;
