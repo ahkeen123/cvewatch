@@ -35,10 +35,23 @@ app.use(
 
 // In production, serve the built React app from the same service, so one
 // deploy gives you one URL instead of juggling a separate frontend host.
+//
+// Vite's JS/CSS bundles are named with a content hash (e.g.
+// index-a1b2c3.js), so they're safe to cache aggressively — a new build
+// gets a new filename automatically. index.html is the opposite: it's
+// always named the same, and it's the thing that tells the browser which
+// hashed bundle to load. If index.html itself gets cached anywhere (the
+// browser, or a CDN/proxy in front of this app), visitors keep loading
+// the OLD bundle forever even after a successful new deploy. So we
+// explicitly forbid caching index.html while leaving the default
+// (cacheable) behavior in place for every hashed asset.
 const clientDist = path.resolve(__dirname, "../../client/dist");
-app.use(express.static(clientDist));
+app.use(express.static(clientDist, { index: false }));
 app.get("*", (req, res, next) => {
   if (req.path.startsWith("/trpc") || req.path === "/health") return next();
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.set("Pragma", "no-cache");
+  res.set("Expires", "0");
   res.sendFile(path.join(clientDist, "index.html"));
 });
 
