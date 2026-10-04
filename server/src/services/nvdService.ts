@@ -194,17 +194,35 @@ export async function fetchCvesForCpe(
 
   const phrases = cpeToKeywords(cpeName) ?? [];
   for (const phrase of phrases) {
-    const matches = await fetchAllChunks(cpeName, chunks, (chunk, startIndex) => {
+    // keywordExactMatch=true turned out to be unreliable on NVD's end —
+    // it 404s even for simple, verifiably-correct multi-word phrases,
+    // independent of any date filtering. So instead: fetch broadly
+    // (every CVE containing ANY of the words, which is what NVD does
+    // without that flag) and do our own exact-phrase-equivalent
+    // filtering client-side, requiring every significant word to
+    // actually appear in the description. This gets the precision we
+    // wanted without depending on NVD's broken flag.
+    const significantWords = phrase
+      .toLowerCase()
+      .split(/[\s-]+/)
+      .filter((w) => w.length > 2); // drop tiny words that aren't meaningfully distinctive
+
+    const candidates = await fetchAllChunks(cpeName, chunks, (chunk, startIndex) => {
       const url = new URL(NVD_BASE_URL);
       url.searchParams.set("keywordSearch", phrase);
-      url.searchParams.set("keywordExactMatch", "true");
       url.searchParams.set("pubStartDate", toNvdDateParam(chunk.start));
       url.searchParams.set("pubEndDate", toNvdDateParam(chunk.end));
       url.searchParams.set("resultsPerPage", "200");
       url.searchParams.set("startIndex", String(startIndex));
       return url;
     });
-    for (const m of matches) byId.set(m.id, m);
+
+    for (const c of candidates) {
+      const text = c.description.toLowerCase();
+      if (significantWords.every((w) => text.includes(w))) {
+        byId.set(c.id, c);
+      }
+    }
   }
 
   return Array.from(byId.values());
