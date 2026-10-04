@@ -9,13 +9,6 @@ export default function Dashboard() {
   const recentCvesQuery = trpc.cves.list.useQuery({ publishedAfter: twoMonthsAgo, limit: 100 });
 
   const products = productsQuery.data ?? [];
-  const totals = (["CRITICAL", "HIGH", "MEDIUM", "LOW"] as const).reduce(
-    (acc, sev) => {
-      acc[sev] = products.reduce((sum, p) => sum + p.severityCounts[sev], 0);
-      return acc;
-    },
-    { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 }
-  );
 
   const urgentCves = (recentCvesQuery.data ?? []).filter(
     (c) => c.severity === "CRITICAL" || c.severity === "HIGH"
@@ -27,15 +20,6 @@ export default function Dashboard() {
       <p className="mb-6 text-sm text-console-muted">
         Fleet status across {products.length} tracked device{products.length === 1 ? "" : "s"}.
       </p>
-
-      <div className="mb-8 grid grid-cols-4 gap-px overflow-hidden rounded border border-console-border bg-console-border">
-        {(["CRITICAL", "HIGH", "MEDIUM", "LOW"] as const).map((sev) => (
-          <div key={sev} className="bg-console-panel px-5 py-4">
-            <div className="text-xs uppercase tracking-wide text-console-muted">{sev}</div>
-            <div className="mt-1 font-mono text-2xl">{totals[sev]}</div>
-          </div>
-        ))}
-      </div>
 
       <h2 className="mb-3 text-lg font-semibold">Products</h2>
       <div className="mb-8 overflow-hidden rounded border border-console-border">
@@ -88,7 +72,9 @@ export default function Dashboard() {
         </table>
       </div>
 
-      <h2 className="mb-3 text-lg font-semibold">Needs attention <span className="font-normal text-sm text-console-muted">(published in the last 2 months)</span></h2>
+      <h2 className="mb-3 text-lg font-semibold">
+        Needs attention <span className="font-normal text-sm text-console-muted">(published in the last 2 months)</span>
+      </h2>
       <div className="overflow-hidden rounded border border-console-border">
         {urgentCves.length === 0 && (
           <div className="px-4 py-6 text-center text-sm text-console-muted">
