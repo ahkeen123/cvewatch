@@ -72,26 +72,41 @@ function extractDescription(descriptions: Array<{ lang: string; value: string }>
   return descriptions?.find((d) => d.lang === "en")?.value ?? "No description available.";
 }
 
-/** Pulls the product name out of a CPE 2.3 string, e.g.
+/** Known acronyms vendors use INSTEAD OF the full product name inside CVE
+ * descriptions — e.g. HPE/Aruba write "CPPM" throughout ClearPass Policy
+ * Manager advisories and never spell out the full name. An exact-phrase
+ * search for the full product name finds nothing in those cases, so for
+ * known products we also try the acronym. This list is necessarily
+ * incomplete — add to it as new gaps like this turn up. */
+const PRODUCT_ACRONYMS: Record<string, string[]> = {
+  clearpass_policy_manager: ["CPPM"],
+};
+
+/** Pulls the product name out of a CPE 2.3 string and returns one or more
+ * keyword phrases to try, e.g.
  * "cpe:2.3:a:f5:big-ip_access_policy_manager:*:*:*:*:*:*:*:*"
- * -> "big-ip access policy manager" (underscores turned into spaces for a
- * natural-language keyword search; hyphens are left alone since they're
- * usually part of the real product name, e.g. "BIG-IP").
+ * -> ["big-ip access policy manager"]
+ * "cpe:2.3:a:arubanetworks:clearpass_policy_manager:*:*:*:*:*:*:*:*"
+ * -> ["clearpass policy manager", "CPPM"]
  *
- * Deliberately omits the vendor name: descriptions very often don't
- * repeat the vendor name when the product name is already distinctive
- * (e.g. "Access Policy Manager" appears without "F5" in the actual
- * text), so including it just adds noise. We always pair this with
- * keywordExactMatch=true (see fetchAllChunks' callers) — without it, NVD
- * treats a multi-word keywordSearch as an OR across every individual
- * word, which is far too broad (e.g. "manager" alone matches almost
- * anything) and both buries real matches and pulls in unrelated CVEs. */
-function cpeToKeywords(cpeName: string): string | null {
+ * The full-name phrase has underscores turned into spaces for a
+ * natural-language keyword search (hyphens are left alone since they're
+ * usually part of the real product name, e.g. "BIG-IP"), and deliberately
+ * omits the vendor name: descriptions very often don't repeat the vendor
+ * name when the product name is already distinctive, so including it
+ * just adds noise. Every phrase is tried with keywordExactMatch=true
+ * (see fetchAllChunks' callers) — without it, NVD treats a multi-word
+ * keywordSearch as an OR across every individual word, which is far too
+ * broad (e.g. "manager" alone matches almost anything) and both buries
+ * real matches and pulls in unrelated CVEs. */
+function cpeToKeywords(cpeName: string): string[] | null {
   const parts = cpeName.split(":");
   // cpe : 2.3 : part : vendor : product : ...
   const product = parts[4];
   if (!product) return null;
-  return product.replace(/_/g, " ").trim();
+  const fullName = product.replace(/_/g, " ").trim();
+  const acronyms = PRODUCT_ACRONYMS[product] ?? [];
+  return [fullName, ...acronyms];
 }
 
 async function nvdFetch(url: URL): Promise<Response> {
@@ -160,21 +175,29 @@ export async function fetchCvesForCpe(
     });
   } catch (err: any) {
     if (err?.status === 404) {
-      const keywords = cpeToKeywords(cpeName);
-      if (keywords) {
+      const phrases = cpeToKeywords(cpeName);
+      if (phrases) {
         console.warn(
-          `virtualMatchString 404 for "${cpeName}" — falling back to keyword search "${keywords}"`
+          `virtualMatchString 404 for "${cpeName}" — falling back to keyword search, trying: ${phrases.join(", ")}`
         );
-        return fetchAllChunks(chunks, (chunk, startIndex) => {
-          const url = new URL(NVD_BASE_URL);
-          url.searchParams.set("keywordSearch", keywords);
-          url.searchParams.set("keywordExactMatch", "true");
-          url.searchParams.set("pubStartDate", toNvdDateParam(chunk.start));
-          url.searchParams.set("pubEndDate", toNvdDateParam(chunk.end));
-          url.searchParams.set("resultsPerPage", "200");
-          url.searchParams.set("startIndex", String(startIndex));
-          return url;
-        });
+        // Try every candidate phrase (full product name, plus any known
+        // acronym like "CPPM") and merge the results, since a CVE might
+        // use one phrasing and not the other. Deduped by CVE id.
+        const byId = new Map<string, NvdCveResult>();
+        for (const phrase of phrases) {
+          const matches = await fetchAllChunks(chunks, (chunk, startIndex) => {
+            const url = new URL(NVD_BASE_URL);
+            url.searchParams.set("keywordSearch", phrase);
+            url.searchParams.set("keywordExactMatch", "true");
+            url.searchParams.set("pubStartDate", toNvdDateParam(chunk.start));
+            url.searchParams.set("pubEndDate", toNvdDateParam(chunk.end));
+            url.searchParams.set("resultsPerPage", "200");
+            url.searchParams.set("startIndex", String(startIndex));
+            return url;
+          });
+          for (const m of matches) byId.set(m.id, m);
+        }
+        return Array.from(byId.values());
       }
     }
     throw err;
