@@ -144,69 +144,80 @@ function toNvdDateParam(d: Date): string {
 }
 
 /**
- * Fetch CVEs matching a CPE name (virtualMatchString), scoped to CVEs
- * published in `year` only, handling pagination, NVD's 120-day max date
- * range (so a full year is requested in chunks), and self-throttling to
- * respect rate limits.
+ * Fetch CVEs for a CPE, scoped to CVEs published in `year` only, handling
+ * pagination, NVD's 120-day max date range (so a full year is requested
+ * in chunks), and self-throttling to respect rate limits.
  *
- * NVD's virtualMatchString lookup can return 404 even for a byte-for-byte
- * correct CPE 2.3 string — this happens for products whose CVEs are
- * catalogued with version-range match criteria rather than a plain
- * wildcard entry, which virtualMatchString doesn't always resolve. Rather
- * than fail outright, we fall back to a plain keyword search on the
- * product name extracted from the CPE string, which finds the same CVEs
- * by full-text match instead of exact CPE-criteria match.
+ * We always run BOTH of NVD's two independent lookup methods and merge
+ * the results, rather than treating one as a fallback for the other:
+ *
+ *  1. virtualMatchString — matches against NVD's official, analyst-
+ *     assigned CPE applicability data. This is the most precise method
+ *     when it has data, but it can come back genuinely empty (as a
+ *     normal 200 response, not an error) for CVEs NVD hasn't finished
+ *     analyzing yet — which, given NVD's well-documented analysis
+ *     backlog, can mean weeks of lag even for very real, actively
+ *     exploited CVEs.
+ *  2. keywordSearch (exact phrase) — matches against the free-text
+ *     description instead, which is populated the moment a CVE is
+ *     published, so it doesn't have that lag. It can miss things too,
+ *     though: some vendors (HPE/Aruba in particular) write only an
+ *     acronym like "CPPM" in the description and never spell out the
+ *     full product name, so we also try any known acronym for the
+ *     product (see PRODUCT_ACRONYMS).
+ *
+ * Relying on either method alone misses real CVEs the other would have
+ * caught, so we query both and dedupe by CVE id. Any single request that
+ * fails (NVD returns 404/500/etc. for reasons that don't always mean
+ * "nothing found" vs. "something's wrong," and it isn't reliably
+ * possible to tell which from outside) is logged and skipped rather than
+ * aborting the whole fetch, so one bad request doesn't erase everything
+ * the other queries did find.
  */
 export async function fetchCvesForCpe(
   cpeName: string,
   year: number = new Date().getFullYear()
 ): Promise<NvdCveResult[]> {
   const chunks = getYearDateChunks(year);
+  const byId = new Map<string, NvdCveResult>();
 
-  try {
-    return await fetchAllChunks(chunks, (chunk, startIndex) => {
+  const virtualMatches = await fetchAllChunks(cpeName, chunks, (chunk, startIndex) => {
+    const url = new URL(NVD_BASE_URL);
+    url.searchParams.set("virtualMatchString", cpeName);
+    url.searchParams.set("pubStartDate", toNvdDateParam(chunk.start));
+    url.searchParams.set("pubEndDate", toNvdDateParam(chunk.end));
+    url.searchParams.set("resultsPerPage", "200");
+    url.searchParams.set("startIndex", String(startIndex));
+    return url;
+  });
+  for (const m of virtualMatches) byId.set(m.id, m);
+
+  const phrases = cpeToKeywords(cpeName) ?? [];
+  for (const phrase of phrases) {
+    const matches = await fetchAllChunks(cpeName, chunks, (chunk, startIndex) => {
       const url = new URL(NVD_BASE_URL);
-      url.searchParams.set("virtualMatchString", cpeName);
+      url.searchParams.set("keywordSearch", phrase);
+      url.searchParams.set("keywordExactMatch", "true");
       url.searchParams.set("pubStartDate", toNvdDateParam(chunk.start));
       url.searchParams.set("pubEndDate", toNvdDateParam(chunk.end));
       url.searchParams.set("resultsPerPage", "200");
       url.searchParams.set("startIndex", String(startIndex));
       return url;
     });
-  } catch (err: any) {
-    if (err?.status === 404) {
-      const phrases = cpeToKeywords(cpeName);
-      if (phrases) {
-        console.warn(
-          `virtualMatchString 404 for "${cpeName}" — falling back to keyword search, trying: ${phrases.join(", ")}`
-        );
-        // Try every candidate phrase (full product name, plus any known
-        // acronym like "CPPM") and merge the results, since a CVE might
-        // use one phrasing and not the other. Deduped by CVE id.
-        const byId = new Map<string, NvdCveResult>();
-        for (const phrase of phrases) {
-          const matches = await fetchAllChunks(chunks, (chunk, startIndex) => {
-            const url = new URL(NVD_BASE_URL);
-            url.searchParams.set("keywordSearch", phrase);
-            url.searchParams.set("keywordExactMatch", "true");
-            url.searchParams.set("pubStartDate", toNvdDateParam(chunk.start));
-            url.searchParams.set("pubEndDate", toNvdDateParam(chunk.end));
-            url.searchParams.set("resultsPerPage", "200");
-            url.searchParams.set("startIndex", String(startIndex));
-            return url;
-          });
-          for (const m of matches) byId.set(m.id, m);
-        }
-        return Array.from(byId.values());
-      }
-    }
-    throw err;
+    for (const m of matches) byId.set(m.id, m);
   }
+
+  return Array.from(byId.values());
 }
 
 /** Walks every date chunk, paginating within each, using `buildUrl` to
- * construct the request for a given chunk + pagination offset. */
+ * construct the request for a given chunk + pagination offset. A request
+ * that comes back non-ok is logged and treated as "0 results for this
+ * chunk" rather than aborting the whole fetch — see fetchCvesForCpe's
+ * doc comment for why NVD's errors here can't be reliably distinguished
+ * from legitimate empty results. */
 async function fetchAllChunks(
+  cpeName: string,
   chunks: Array<{ start: Date; end: Date }>,
   buildUrl: (chunk: { start: Date; end: Date }, startIndex: number) => URL
 ): Promise<NvdCveResult[]> {
@@ -223,9 +234,12 @@ async function fetchAllChunks(
         continue;
       }
       if (!res.ok) {
-        const error: any = new Error(`NVD API error ${res.status}: ${await res.text()}`);
-        error.status = res.status;
-        throw error;
+        console.warn(
+          `NVD request failed (${res.status}) for "${cpeName}", chunk ${toNvdDateParam(chunk.start)}–${toNvdDateParam(
+            chunk.end
+          )} — treating as 0 results for this chunk. URL: ${url.toString()}`
+        );
+        break;
       }
 
       const data = (await res.json()) as { vulnerabilities?: Array<{ cve: any }>; totalResults?: number };
