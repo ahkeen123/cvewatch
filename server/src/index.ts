@@ -35,8 +35,6 @@ app.use(
 
 // In production, serve the built React app from the same service, so one
 // deploy gives you one URL instead of juggling a separate frontend host.
-// (In local dev, run `npm run dev` instead, which uses Vite's own dev
-// server on :5173 — this static branch is skipped there.)
 const clientDist = path.resolve(__dirname, "../../client/dist");
 app.use(express.static(clientDist));
 app.get("*", (req, res, next) => {
@@ -48,27 +46,22 @@ app.listen(PORT, () => {
   console.log(`CVEWatch listening on http://localhost:${PORT}`);
 });
 
-// Refresh all products against NVD once a day at 03:00 server time.
-cron.schedule("0 3 * * *", async () => {
-  console.log("[cron] Starting scheduled NVD refresh...");
-  try {
-    const summary = await refreshAllProducts();
-    console.log("[cron] Refresh complete:", summary);
-  } catch (err) {
-    console.error("[cron] Refresh failed:", err);
-  }
-});
-
-// Refresh all products against NVD once a day at 03:00 server time.
-// NVD's own data updates roughly every 2 hours, so daily is a reasonable
-// default given the free-tier rate limit; tighten this once you have an
-// API key and/or fewer products sharing the quota.
-cron.schedule("0 3 * * *", async () => {
-  console.log("[cron] Starting scheduled NVD refresh...");
-  try {
-    const summary = await refreshAllProducts();
-    console.log("[cron] Refresh complete:", summary);
-  } catch (err) {
-    console.error("[cron] Refresh failed:", err);
-  }
-});
+// Refresh every product automatically, once a day at 7:00 AM Singapore
+// time — runs on the server regardless of whether anyone has the app
+// open in a browser. The `timezone` option handles the UTC conversion
+// for us, so this stays correct even across daylight-saving changes
+// elsewhere (Singapore doesn't observe DST, but this is the right way
+// to express "7am local time" either way).
+cron.schedule(
+  "0 7 * * *",
+  async () => {
+    console.log("[cron] Starting scheduled daily NVD refresh (7am Asia/Singapore)...");
+    try {
+      const summary = await refreshAllProducts();
+      console.log("[cron] Refresh complete:", summary);
+    } catch (err) {
+      console.error("[cron] Refresh failed:", err);
+    }
+  },
+  { timezone: "Asia/Singapore" }
+);
