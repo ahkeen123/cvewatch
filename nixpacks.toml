@@ -1,0 +1,11 @@
+# Overrides Nixpacks' default install step.
+#
+# Nixpacks normally runs `npm ci`, which strictly requires package.json
+# and package-lock.json to match exactly — any manual edit to package.json
+# (e.g. adding a dependency by hand through GitHub's web uploader, without
+# running `npm install` locally afterward to update the lock file) breaks
+# this. `npm install` is far more forgiving: it updates the lock file
+# in-place as needed instead of refusing to proceed, which fits this
+# project's workflow much better.
+[phases.install]
+cmds = ["npm install"]
