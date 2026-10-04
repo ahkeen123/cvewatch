@@ -78,12 +78,14 @@ function extractDescription(descriptions: Array<{ lang: string; value: string }>
  * natural-language keyword search; hyphens are left alone since they're
  * usually part of the real product name, e.g. "BIG-IP").
  *
- * Deliberately omits the vendor name: NVD's keywordSearch requires every
- * term to appear in the CVE description (it's an AND match), and
- * descriptions very often don't repeat the vendor name when the product
- * name is already distinctive (e.g. "Access Policy Manager" appears
- * without "F5" in the actual text), so including it just causes false
- * negatives. */
+ * Deliberately omits the vendor name: descriptions very often don't
+ * repeat the vendor name when the product name is already distinctive
+ * (e.g. "Access Policy Manager" appears without "F5" in the actual
+ * text), so including it just adds noise. We always pair this with
+ * keywordExactMatch=true (see fetchAllChunks' callers) — without it, NVD
+ * treats a multi-word keywordSearch as an OR across every individual
+ * word, which is far too broad (e.g. "manager" alone matches almost
+ * anything) and both buries real matches and pulls in unrelated CVEs. */
 function cpeToKeywords(cpeName: string): string | null {
   const parts = cpeName.split(":");
   // cpe : 2.3 : part : vendor : product : ...
@@ -166,6 +168,7 @@ export async function fetchCvesForCpe(
         return fetchAllChunks(chunks, (chunk, startIndex) => {
           const url = new URL(NVD_BASE_URL);
           url.searchParams.set("keywordSearch", keywords);
+          url.searchParams.set("keywordExactMatch", "true");
           url.searchParams.set("pubStartDate", toNvdDateParam(chunk.start));
           url.searchParams.set("pubEndDate", toNvdDateParam(chunk.end));
           url.searchParams.set("resultsPerPage", "200");
